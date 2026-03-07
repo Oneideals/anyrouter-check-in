@@ -1,0 +1,21 @@
+name: Sync Fork
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync upstream
+        run: |
+          git remote add upstream https://github.com/millylee/anyrouter-check-in.git
+          git fetch upstream
+          git checkout main
+          git merge upstream/main --no-edit
+          git push
