@@ -1,7 +1,8 @@
 name: AnyRouter 自动签到
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    # 每天 00:30 UTC（北京时间 8:30）触发，配合下方随机延迟步骤实现每日一次随机时间签到
+    - cron: '30 0 * * *'
   workflow_dispatch:
     inputs:
       debug:
@@ -19,6 +20,13 @@ jobs:
       PYTHONUNBUFFERED: 1
       DEBUG_MODE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.debug == 'true' && 'true' || 'false' }}
     steps:
+    - name: 随机延迟（仅定时触发）
+      if: github.event_name == 'schedule'
+      run: |
+        DELAY=$((RANDOM * 3 % 10800))
+        echo "随机延迟 $((DELAY / 60)) 分 $((DELAY % 60)) 秒后开始签到"
+        sleep ${DELAY}
+
     - uses: actions/checkout@v6
 
     - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
