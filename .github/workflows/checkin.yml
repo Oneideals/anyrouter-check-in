@@ -1,8 +1,8 @@
 name: AnyRouter 自动签到
 on:
   schedule:
-    # 每天 00:30 UTC（北京时间 8:30）触发，配合下方随机延迟步骤实现每日一次随机时间签到
-    - cron: '30 0 * * *'
+    # 每天 22:07 UTC（北京时间 06:07）触发，配合下方随机延迟步骤实现 6:00~14:00 之间的每日随机时间签到
+    - cron: '7 22 * * *'
   workflow_dispatch:
     inputs:
       debug:
@@ -14,6 +14,7 @@ on:
 jobs:
   checkin:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     environment: production
     env:
       PYTHONIOENCODING: utf-8
@@ -23,8 +24,12 @@ jobs:
     - name: 随机延迟（仅定时触发）
       if: github.event_name == 'schedule'
       run: |
-        DELAY=$((RANDOM * 3 % 10800))
-        echo "随机延迟 $((DELAY / 60)) 分 $((DELAY % 60)) 秒后开始签到"
+        # 随机延迟 0 ~ 23400 秒（0 ~ 6.5 小时），签到时间随机分布在 06:07 ~ 13:00 之间
+        DELAY=$(( (RANDOM * 32768 + RANDOM) % 23400 ))
+        HOURS=$((DELAY / 3600))
+        MINS=$(((DELAY % 3600) / 60))
+        SECS=$((DELAY % 60))
+        echo "⏰ 本次随机延迟: ${HOURS} 小时 ${MINS} 分 ${SECS} 秒后开始签到"
         sleep ${DELAY}
 
     - uses: actions/checkout@v6
