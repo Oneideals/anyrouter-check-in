@@ -8,7 +8,18 @@ import hashlib
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+try:
+	from zoneinfo import ZoneInfo
+	BEIJING_TZ = ZoneInfo('Asia/Shanghai')
+except Exception:
+	BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def get_beijing_time_str() -> str:
+	"""获取带 (UTC+8) 标识的北京时间字符串"""
+	return datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S (UTC+8)')
 
 if hasattr(sys.stdout, 'reconfigure'):
 	sys.stdout.reconfigure(line_buffering=True)
@@ -486,7 +497,7 @@ async def main():
 		print('[INFO] Debug mode disabled (set DEBUG_MODE=true to enable screenshots and verbose logs)')
 
 	print('[SYSTEM] AnyRouter.top multi-account auto check-in script started')
-	print(f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
+	print(f'[TIME] Execution time: {get_beijing_time_str()}')
 
 	app_config = AppConfig.load_from_env()
 	print(f'[INFO] Loaded {len(app_config.providers)} provider configuration(s)')
@@ -614,7 +625,7 @@ async def main():
 		else:
 			summary.append('[ERROR] All accounts check-in failed')
 
-		time_info = f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
+		time_info = f'[TIME] Execution time: {get_beijing_time_str()}'
 
 		notify_content = '\n\n'.join([time_info, '\n'.join(notification_content), '\n'.join(summary)])
 		screenshot_paths = take_pending_screenshots() if is_debug_enabled() else []

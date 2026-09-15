@@ -1,8 +1,11 @@
 name: AnyRouter 自动签到
 on:
   schedule:
-    # 每天 22:07 UTC（北京时间 06:07）触发，配合下方随机延迟步骤实现 6:00~14:00 之间的每日随机时间签到
-    - cron: '7 22 * * *'
+    # 每天两个触发时段（UTC 时间）：
+    # 1. 22:07 UTC（北京时间次日 06:07，上午场）
+    # 2. 04:07 UTC（北京时间当日 12:07，下午场）
+    # 双批次调度 + 随机延迟，将签到时间离散分布在每日 06:00~18:00（12小时）内，且单次运行严格不超时
+    - cron: '7 4,22 * * *'
   workflow_dispatch:
     inputs:
       debug:
@@ -12,146 +15,230 @@ on:
         type: boolean
 
 jobs:
+  decide:
+    name: 调度决策与去重检查
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.decision.outputs.should_run }}
+      delay_seconds: ${{ steps.decision.outputs.delay_seconds }}
+      today: ${{ steps.bj-date.outputs.today }}
+    steps:
+      - name: 获取北京时间日期与小时
+        id: bj-date
+        run: |
+          TODAY=$(TZ='Asia/Shanghai' date +%Y-%m-%d)
+          HOUR=$(TZ='Asia/Shanghai' date +%-H)
+          echo "today=${TODAY}" >> $GITHUB_OUTPUT
+          echo "hour=${HOUR}" >> $GITHUB_OUTPUT
+          echo "📅 当前北京时间日期: ${TODAY}, 当前小时: ${HOUR}"
+
+      - name: 检查今日签到状态缓存
+        if: github.event_name == 'schedule'
+        uses: actions/cache@v5
+        id: daily-cache
+        with:
+          path: .daily_checkin_done
+          key: daily-checkin-${{ steps.bj-date.outputs.today }}
+
+      - name: 调度决策与延迟计算
+        id: decision
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "⚡ 手动触发，立即执行签到"
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "delay_seconds=0" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          if [ "${{ steps.daily-cache.outputs.cache-hit }}" = "true" ]; then
+            echo "✅ 今日 (${{ steps.bj-date.outputs.today }}) 已完成签到，跳过本次批次"
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            echo "delay_seconds=0" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          CURRENT_HOUR=${{ steps.bj-date.outputs.hour }}
+          echo "⏰ 当前北京时间小时: ${CURRENT_HOUR}"
+
+          # 上午场（< 12点，对应 22:07 UTC 触发）
+          if [ "${CURRENT_HOUR}" -lt 12 ]; then
+            COIN=$(( RANDOM % 2 ))
+            if [ "${COIN}" -eq 1 ]; then
+              echo "🎲 决策：推迟至下午场（12:00~18:00）执行，本次上午场跳过"
+              echo "should_run=false" >> $GITHUB_OUTPUT
+              echo "delay_seconds=0" >> $GITHUB_OUTPUT
+              exit 0
+            else
+              echo "🎲 决策：在上午场（06:00~12:00）执行签到"
+            fi
+          else
+            echo "🎲 决策：在下午场（12:00~18:00）执行签到"
+          fi
+
+          # 随机延迟 0 ~ 21000 秒（0 ~ 5.8 小时，预留余量确保 Job 总时长绝不触碰 GitHub 6 小时超时红线）
+          DELAY=$(( (RANDOM * 32768 + RANDOM) % 21000 ))
+          HOURS=$((DELAY / 3600))
+          MINS=$(((DELAY % 3600) / 60))
+          SECS=$((DELAY % 60))
+          echo "⏰ 计算随机延迟: ${HOURS} 小时 ${MINS} 分 ${SECS} 秒 (${DELAY} 秒)"
+          echo "should_run=true" >> $GITHUB_OUTPUT
+          echo "delay_seconds=${DELAY}" >> $GITHUB_OUTPUT
+
   checkin:
+    name: 执行签到
+    needs: decide
+    if: needs.decide.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     environment: production
     env:
+      TZ: 'Asia/Shanghai'
       PYTHONIOENCODING: utf-8
       PYTHONUNBUFFERED: 1
       DEBUG_MODE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.debug == 'true' && 'true' || 'false' }}
     steps:
-    - name: 随机延迟（仅定时触发）
-      if: github.event_name == 'schedule'
-      run: |
-        # 随机延迟 0 ~ 23400 秒（0 ~ 6.5 小时），签到时间随机分布在 06:07 ~ 13:00 之间
-        DELAY=$(( (RANDOM * 32768 + RANDOM) % 23400 ))
-        HOURS=$((DELAY / 3600))
-        MINS=$(((DELAY % 3600) / 60))
-        SECS=$((DELAY % 60))
-        echo "⏰ 本次随机延迟: ${HOURS} 小时 ${MINS} 分 ${SECS} 秒后开始签到"
-        sleep ${DELAY}
+      - name: 随机延迟等待
+        if: github.event_name == 'schedule' && needs.decide.outputs.delay_seconds != '0'
+        run: |
+          DELAY=${{ needs.decide.outputs.delay_seconds }}
+          HOURS=$((DELAY / 3600))
+          MINS=$(((DELAY % 3600) / 60))
+          SECS=$((DELAY % 60))
+          echo "⏰ 开始随机延迟等待: ${HOURS} 小时 ${MINS} 分 ${SECS} 秒后执行签到..."
+          sleep ${DELAY}
 
-    - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
 
-    - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
-      with:
-        version: "latest"
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: "latest"
 
-    - uses: actions/setup-python@v6
-      with:
-        python-version: '3.11'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
 
-    - name: 缓存 UV 依赖
-      uses: actions/cache@v5
-      id: uv-cache
-      with:
-        path: ~/.cache/uv
-        key: ${{ runner.os }}-uv-${{ hashFiles('pyproject.toml', 'uv.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-uv-
+      - name: 缓存 UV 依赖
+        uses: actions/cache@v5
+        id: uv-cache
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-uv-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-uv-
 
-    - name: 安装依赖
-      run: |
-        uv sync --frozen
-        echo "✅ 环境初始化完成"
+      - name: 安装依赖
+        run: |
+          uv sync --frozen
+          echo "✅ 环境初始化完成"
 
-    - name: 安装系统依赖
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y xvfb fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
-          fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
+            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf
 
-    - name: 缓存 CloakBrowser 二进制
-      uses: actions/cache@v5
-      id: cloakbrowser-cache
-      with:
-        path: ~/.cloakbrowser
-        key: ${{ runner.os }}-cloakbrowser-v1
-        restore-keys: |
-          ${{ runner.os }}-cloakbrowser-
+      - name: 缓存 CloakBrowser 二进制
+        uses: actions/cache@v5
+        id: cloakbrowser-cache
+        with:
+          path: ~/.cloakbrowser
+          key: ${{ runner.os }}-cloakbrowser-v1
+          restore-keys: |
+            ${{ runner.os }}-cloakbrowser-
 
-    - name: 安装 CloakBrowser
-      run: |
-        uv run python -m cloakbrowser install
-        echo "✅ CloakBrowser 安装完成"
+      - name: 安装 CloakBrowser
+        run: |
+          uv run python -m cloakbrowser install
+          echo "✅ CloakBrowser 安装完成"
 
-    - name: 恢复余额历史缓存
-      uses: actions/cache@v5
-      with:
-        path: balance_hash.txt
-        key: balance-hash-${{ github.ref_name }}-${{ github.run_id }}
-        restore-keys: |
-          balance-hash-${{ github.ref_name }}-
-          balance-hash-
+      - name: 恢复余额历史缓存
+        uses: actions/cache@v5
+        with:
+          path: balance_hash.txt
+          key: balance-hash-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            balance-hash-${{ github.ref_name }}-
+            balance-hash-
 
-    - name: 恢复浏览器 Profile 缓存
-      uses: actions/cache@v5
-      with:
-        path: .browser_profiles
-        key: browser-profiles-${{ runner.os }}-v1
-        restore-keys: |
-          browser-profiles-${{ runner.os }}-
+      - name: 恢复浏览器 Profile 缓存
+        uses: actions/cache@v5
+        with:
+          path: .browser_profiles
+          key: browser-profiles-${{ runner.os }}-v1
+          restore-keys: |
+            browser-profiles-${{ runner.os }}-
 
-    - name: 配置代理
-      env:
-        PROXY_SUBSCRIPTION_URL: ${{ secrets.PROXY_SUBSCRIPTION_URL }}
-        PROXY_TEST_URL: https://www.google.com/generate_204
-        MIHOMO_VERSION: v1.19.27
-        PROXY_REQUIRED: false
-      run: bash scripts/setup_mihomo_proxy.sh
+      - name: 配置代理
+        env:
+          PROXY_SUBSCRIPTION_URL: ${{ secrets.PROXY_SUBSCRIPTION_URL }}
+          PROXY_TEST_URL: https://www.google.com/generate_204
+          MIHOMO_VERSION: v1.19.27
+          PROXY_REQUIRED: false
+        run: bash scripts/setup_mihomo_proxy.sh
 
-    - name: 执行签到
-      env:
-        DEBUG_MODE: ${{ env.DEBUG_MODE }}
-        CHECKIN_HEADLESS: false
-        CHECKIN_HUMANIZE: true
-        CHECKIN_WAIT_TIMEOUT_MS: 120000
-        ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
-        PROVIDERS: ${{ secrets.PROVIDERS }}
-        DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
-        EMAIL_USER: ${{ secrets.EMAIL_USER }}
-        EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
-        EMAIL_TO: ${{ secrets.EMAIL_TO }}
-        EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
-        CUSTOM_SMTP_SERVER: ${{ secrets.CUSTOM_SMTP_SERVER }}
-        PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-        SERVERPUSHKEY: ${{ secrets.SERVERPUSHKEY }}
-        FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
-        WEIXIN_WEBHOOK: ${{ secrets.WEIXIN_WEBHOOK }}
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        GOTIFY_URL: ${{ secrets.GOTIFY_URL }}
-        GOTIFY_TOKEN: ${{ secrets.GOTIFY_TOKEN }}
-        GOTIFY_PRIORITY: ${{ secrets.GOTIFY_PRIORITY }}
-        BARK_KEY: ${{ secrets.BARK_KEY }}
-        BARK_SERVER: ${{ secrets.BARK_SERVER }}
-      run: |
-        xvfb-run -a --server-args="-screen 0 1920x1080x24" uv run checkin.py
+      - name: 执行签到
+        env:
+          DEBUG_MODE: ${{ env.DEBUG_MODE }}
+          CHECKIN_HEADLESS: false
+          CHECKIN_HUMANIZE: true
+          CHECKIN_WAIT_TIMEOUT_MS: 120000
+          ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
+          PROVIDERS: ${{ secrets.PROVIDERS }}
+          DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          CUSTOM_SMTP_SERVER: ${{ secrets.CUSTOM_SMTP_SERVER }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          SERVERPUSHKEY: ${{ secrets.SERVERPUSHKEY }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          WEIXIN_WEBHOOK: ${{ secrets.WEIXIN_WEBHOOK }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GOTIFY_URL: ${{ secrets.GOTIFY_URL }}
+          GOTIFY_TOKEN: ${{ secrets.GOTIFY_TOKEN }}
+          GOTIFY_PRIORITY: ${{ secrets.GOTIFY_PRIORITY }}
+          BARK_KEY: ${{ secrets.BARK_KEY }}
+          BARK_SERVER: ${{ secrets.BARK_SERVER }}
+        run: |
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" uv run checkin.py
 
-    - name: 上传调试截图
-      if: always() && env.DEBUG_MODE == 'true'
-      env:
-        HTTP_PROXY: ''
-        HTTPS_PROXY: ''
-      uses: actions/upload-artifact@v4
-      with:
-        name: checkin-screenshots-${{ github.run_id }}
-        path: checkin_screenshots/
-        if-no-files-found: warn
-        include-hidden-files: true
-        retention-days: 14
+      - name: 上传调试截图
+        if: always() && env.DEBUG_MODE == 'true'
+        env:
+          HTTP_PROXY: ''
+          HTTPS_PROXY: ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkin-screenshots-${{ github.run_id }}
+          path: checkin_screenshots/
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 14
 
-    - name: 停止代理
-      if: always()
-      run: bash scripts/stop_mihomo_proxy.sh
+      - name: 停止代理
+        if: always()
+        run: bash scripts/stop_mihomo_proxy.sh
 
-    - name: 执行结果
-      if: always()
-      run: |
-        echo "签到任务执行完成"
-        echo "时间: $(date)"
-        if [ "${DEBUG_MODE}" = "true" ] && [ -d checkin_screenshots ] && [ "$(ls -A checkin_screenshots 2>/dev/null)" ]; then
-          echo "调试截图已上传为 artifact: checkin-screenshots-${{ github.run_id }}"
-          ls -la checkin_screenshots/
-        fi
+      - name: 标记今日签到完成
+        if: success() && github.event_name == 'schedule'
+        run: |
+          echo "${{ needs.decide.outputs.today }}" > .daily_checkin_done
+
+      - name: 保存今日签到状态缓存
+        if: success() && github.event_name == 'schedule'
+        uses: actions/cache/save@v5
+        with:
+          path: .daily_checkin_done
+          key: daily-checkin-${{ needs.decide.outputs.today }}
+
+      - name: 执行结果
+        if: always()
+        run: |
+          echo "签到任务执行完成"
+          echo "时间: $(date)"
+          if [ "${DEBUG_MODE}" = "true" ] && [ -d checkin_screenshots ] && [ "$(ls -A checkin_screenshots 2>/dev/null)" ]; then
+            echo "调试截图已上传为 artifact: checkin-screenshots-${{ github.run_id }}"
+            ls -la checkin_screenshots/
+          fi
