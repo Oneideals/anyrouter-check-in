@@ -1,12 +1,13 @@
 # 🚀 Project Progress & Agent Handover — anyrouter-check-in
 
-> **Last Updated:** 2026-09-15T07:26:30Z (read-only projection)
-> **Git State:** `clean` | **Branch:** `main` | **Events Count:** 8
+> **Last Updated:** 2026-09-28T16:09:50Z (read-only projection)
+> **Git State:** `dirty` | **Branch:** `main` | **Events Count:** 10
 
 ---
 
 ## 🎯 Recent Milestones & Completed Tasks ([DONE])
 
+- [DONE] (agy, 2026-09-28) feat(notify): 优化余额查询重试与通知卡片容错机制，杜绝账号漏显
 - [DONE] (agy, 2026-09-15) feat(workflow): 实现双批次 0-12 小时随机调度并修复通知时区为北京时间 [DONE]
 - [DONE] (agy, 2026-09-15) 完成0-12小时双批次随机调度工作流改造及通知时区修复
 - [DONE] (agy, 2026-09-14) 完成 session 更新、工作流签到验证与 Telegram 通知触发
@@ -21,7 +22,8 @@ _No active leases._
 
 ## 📝 Working Tree Changes
 
-_Working tree is clean._
+- `.M` `checkin.py`
+- `.M` `tests/test_checkin_state.py`
 
 ## 💡 Handoff Instructions for Next Agent
 

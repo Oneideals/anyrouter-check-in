@@ -8,10 +8,12 @@ import hashlib
 import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 try:
 	from zoneinfo import ZoneInfo
+
 	BEIJING_TZ = ZoneInfo('Asia/Shanghai')
 except Exception:
 	BEIJING_TZ = timezone(timedelta(hours=8))
@@ -20,6 +22,7 @@ except Exception:
 def get_beijing_time_str() -> str:
 	"""获取带 (UTC+8) 标识的北京时间字符串"""
 	return datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S (UTC+8)')
+
 
 if hasattr(sys.stdout, 'reconfigure'):
 	sys.stdout.reconfigure(line_buffering=True)
@@ -245,26 +248,35 @@ async def login_with_credentials(
 		return None
 
 
-def get_user_info(client, headers, user_info_url: str):
-	"""获取用户信息"""
-	try:
-		response = client.get(user_info_url, headers=headers, timeout=30)
+def get_user_info(client, headers, user_info_url: str, retries: int = 1, timeout: float = 15.0):
+	"""获取用户信息，支持失败重试"""
+	last_error = 'Unknown error'
+	for attempt in range(retries + 1):
+		try:
+			response = client.get(user_info_url, headers=headers, timeout=timeout)
 
-		if response.status_code == 200:
-			data = response.json()
-			if data.get('success'):
-				user_data = data.get('data', {})
-				quota = round(user_data.get('quota', 0) / 500000, 2)
-				used_quota = round(user_data.get('used_quota', 0) / 500000, 2)
-				return {
-					'success': True,
-					'quota': quota,
-					'used_quota': used_quota,
-					'display': f':money: Current balance: ${quota}, Used: ${used_quota}',
-				}
-		return {'success': False, 'error': f'Failed to get user info: HTTP {response.status_code}'}
-	except Exception as e:
-		return {'success': False, 'error': f'Failed to get user info: {str(e)[:50]}...'}
+			if response.status_code == 200:
+				data = response.json()
+				if data.get('success'):
+					user_data = data.get('data', {})
+					quota = round(user_data.get('quota', 0) / 500000, 2)
+					used_quota = round(user_data.get('used_quota', 0) / 500000, 2)
+					return {
+						'success': True,
+						'quota': quota,
+						'used_quota': used_quota,
+						'display': f':money: Current balance: ${quota}, Used: ${used_quota}',
+					}
+				last_error = f'API returned success=false: {data.get("message", "Unknown error")}'
+			else:
+				last_error = f'HTTP {response.status_code}'
+		except Exception as e:
+			last_error = f'{str(e)[:50]}...'
+
+		if attempt < retries:
+			time.sleep(1.5)
+
+	return {'success': False, 'error': f'Failed to get user info: {last_error}'}
 
 
 async def prepare_cookies(account_name: str, provider_config, user_cookies: dict) -> dict | None:
@@ -327,36 +339,86 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 
 
 def format_check_in_notification(detail: dict) -> str:
-	"""格式化签到通知消息"""
+	"""格式化签到通知消息，支持降级与异常卡片"""
+	name = detail['name']
 	lines = [
-		f'[CHECK-IN] {detail["name"]}',
+		f'[CHECK-IN] {name}',
 		'  ━━━━━━━━━━━━━━━━━━━━',
-		'  签到前',
-		f'     余额: ${detail["before_quota"]:.2f}  |  累计消耗: ${detail["before_used"]:.2f}',
-		'  签到后',
-		f'     余额: ${detail["after_quota"]:.2f}  |  累计消耗: ${detail["after_used"]:.2f}',
 	]
 
-	has_reward = detail['check_in_reward'] != 0
-	has_usage = detail['usage_increase'] != 0
+	if not detail.get('success'):
+		lines.append('  状态: [FAIL] 签到失败')
+		if detail.get('error'):
+			lines.append(f'  原因: {detail["error"]}')
+		return '\n'.join(lines)
 
-	if has_reward or has_usage:
-		lines.append('  ━━━━━━━━━━━━━━━━━━━━')
+	before_quota = detail.get('before_quota')
+	before_used = detail.get('before_used')
+	after_quota = detail.get('after_quota')
+	after_used = detail.get('after_used')
 
-		if not has_reward and has_usage:
-			lines.append('  今日已签到（期间有使用）')
+	if before_quota is not None and after_quota is not None:
+		lines.extend(
+			[
+				'  签到前',
+				f'     余额: ${before_quota:.2f}  |  累计消耗: ${(before_used or 0.0):.2f}',
+				'  签到后',
+				f'     余额: ${after_quota:.2f}  |  累计消耗: ${(after_used or 0.0):.2f}',
+			]
+		)
 
-		if has_reward:
-			lines.append(f'  签到获得: +${detail["check_in_reward"]:.2f}')
+		check_in_reward = detail.get('check_in_reward') or 0.0
+		usage_increase = detail.get('usage_increase') or 0.0
+		balance_change = detail.get('balance_change') or 0.0
 
-		if has_usage:
-			lines.append(f'  期间消耗: ${detail["usage_increase"]:.2f}')
+		has_reward = check_in_reward != 0
+		has_usage = usage_increase != 0
 
-		if detail['balance_change'] != 0:
-			change_symbol = '+' if detail['balance_change'] > 0 else ''
-			lines.append(f'  余额变化: {change_symbol}${detail["balance_change"]:.2f}')
+		if has_reward or has_usage:
+			lines.append('  ━━━━━━━━━━━━━━━━━━━━')
+
+			if not has_reward and has_usage:
+				lines.append('  今日已签到（期间有使用）')
+
+			if has_reward:
+				lines.append(f'  签到获得: +${check_in_reward:.2f}')
+
+			if has_usage:
+				lines.append(f'  期间消耗: ${usage_increase:.2f}')
+
+			if balance_change != 0:
+				change_symbol = '+' if balance_change > 0 else ''
+				lines.append(f'  余额变化: {change_symbol}${balance_change:.2f}')
+		else:
+			lines.extend(['  ━━━━━━━━━━━━━━━━━━━━', '  今日已签到，无变化'])
+
+	elif before_quota is not None and after_quota is None:
+		lines.extend(
+			[
+				'  签到状态: [SUCCESS] 签到成功',
+				'  签到前',
+				f'     余额: ${before_quota:.2f}  |  累计消耗: ${(before_used or 0.0):.2f}',
+				'  签到后',
+				f'     [WARN] 最新余额查询异常: {detail.get("error", "超时或网络错误")}',
+			]
+		)
+
+	elif before_quota is None and after_quota is not None:
+		lines.extend(
+			[
+				'  签到状态: [SUCCESS] 签到成功',
+				'  当前余额',
+				f'     余额: ${after_quota:.2f}  |  累计消耗: ${(after_used or 0.0):.2f}',
+			]
+		)
+
 	else:
-		lines.extend(['  ━━━━━━━━━━━━━━━━━━━━', '  今日已签到，无变化'])
+		lines.extend(
+			[
+				'  签到状态: [SUCCESS] 签到成功',
+				f'  余额信息: {detail.get("error", "获取失败")}',
+			]
+		)
 
 	return '\n'.join(lines)
 
@@ -469,6 +531,10 @@ def run_check_in_requests(
 			if provider_config.needs_manual_check_in():
 				success = execute_check_in(client, account_name, provider_config, headers)
 				user_info_after = get_user_info(client, headers, user_info_url)
+				if user_info_after and user_info_after.get('success'):
+					print(f'[INFO] {account_name}: Updated {user_info_after["display"]}')
+				elif user_info_after:
+					print(f'[WARN] {account_name}: {user_info_after.get("error", "Failed to get updated user info")}')
 				return success, user_info_before, user_info_after
 
 			user_info_after = get_user_info(client, headers, user_info_url)
@@ -526,64 +592,78 @@ async def main():
 
 	for i, account in enumerate(accounts):
 		account_key = f'account_{i + 1}'
+		account_name = account.get_display_name(i)
 		try:
 			success, user_info_before, user_info_after = await check_in_account(account, i, app_config)
 			if success:
 				success_count += 1
 
-			should_notify_this_account = False
+			before_success = bool(user_info_before and user_info_before.get('success'))
+			after_success = bool(user_info_after and user_info_after.get('success'))
 
+			before_quota = user_info_before['quota'] if before_success else None
+			before_used = user_info_before['used_quota'] if before_success else None
+			after_quota = user_info_after['quota'] if after_success else None
+			after_used = user_info_after['used_quota'] if after_success else None
+
+			if after_success:
+				current_balances[account_key] = {'quota': after_quota, 'used': after_used}
+			elif before_success:
+				# 降级保留签到前余额，避免因单次超时造成 balance_hash 突变抖动
+				current_balances[account_key] = {'quota': before_quota, 'used': before_used}
+
+			check_in_reward = 0.0
+			usage_increase = 0.0
+			balance_change = 0.0
+			if before_success and after_success:
+				total_before = before_quota + before_used
+				total_after = after_quota + after_used
+				check_in_reward = total_after - total_before
+				usage_increase = after_used - before_used
+				balance_change = after_quota - before_quota
+
+			error_msg = None
 			if not success:
-				should_notify_this_account = True
 				need_notify = True
-				account_name = account.get_display_name(i)
 				print(f'[NOTIFY] {account_name} failed, will send notification')
+				error_msg = (
+					user_info_after.get('error')
+					if user_info_after
+					else (user_info_before.get('error') if user_info_before else '签到失败')
+				)
+			elif not after_success:
+				need_notify = True
+				print(f'[NOTIFY] {account_name}: Check-in succeeded but balance query failed, will send notification')
+				error_msg = user_info_after.get('error') if user_info_after else '最新余额获取失败'
 
-			if user_info_after and user_info_after.get('success'):
-				current_quota = user_info_after['quota']
-				current_used = user_info_after['used_quota']
-				current_balances[account_key] = {'quota': current_quota, 'used': current_used}
-
-				if user_info_before and user_info_before.get('success'):
-					before_quota = user_info_before['quota']
-					before_used = user_info_before['used_quota']
-					after_quota = user_info_after['quota']
-					after_used = user_info_after['used_quota']
-
-					total_before = before_quota + before_used
-					total_after = after_quota + after_used
-
-					check_in_reward = total_after - total_before
-					usage_increase = after_used - before_used
-					balance_change = after_quota - before_quota
-
-					account_check_in_details[account_key] = {
-						'name': account.get_display_name(i),
-						'before_quota': before_quota,
-						'before_used': before_used,
-						'after_quota': after_quota,
-						'after_used': after_used,
-						'check_in_reward': check_in_reward,
-						'usage_increase': usage_increase,
-						'balance_change': balance_change,
-						'success': success,
-					}
-
-			if should_notify_this_account:
-				account_name = account.get_display_name(i)
-				status = '[SUCCESS]' if success else '[FAIL]'
-				account_result = f'{status} {account_name}'
-				if user_info_after and user_info_after.get('success'):
-					account_result += f'\n{user_info_after["display"]}'
-				elif user_info_after:
-					account_result += f'\n{user_info_after.get("error", "Unknown error")}'
-				notification_content.append(account_result)
+			account_check_in_details[account_key] = {
+				'name': account_name,
+				'success': success,
+				'before_quota': before_quota,
+				'before_used': before_used,
+				'after_quota': after_quota,
+				'after_used': after_used,
+				'check_in_reward': check_in_reward,
+				'usage_increase': usage_increase,
+				'balance_change': balance_change,
+				'error': error_msg,
+			}
 
 		except Exception as e:
-			account_name = account.get_display_name(i)
 			print(f'[FAILED] {account_name} processing exception: {e}')
 			need_notify = True
-			notification_content.append(f'[FAIL] {account_name} exception: {str(e)[:50]}...')
+			account_check_in_details[account_key] = {
+				'name': account_name,
+				'success': False,
+				'before_quota': None,
+				'before_used': None,
+				'after_quota': None,
+				'after_used': None,
+				'check_in_reward': 0.0,
+				'usage_increase': 0.0,
+				'balance_change': 0.0,
+				'error': str(e)[:50],
+			}
 
 	current_balance_hash = generate_balance_hash(current_balances) if current_balances else None
 	if current_balance_hash:
@@ -598,15 +678,13 @@ async def main():
 		else:
 			print('[INFO] No balance changes detected')
 
-	if balance_changed:
+	if balance_changed or need_notify:
 		for i, account in enumerate(accounts):
 			account_key = f'account_{i + 1}'
 			if account_key in account_check_in_details:
 				detail = account_check_in_details[account_key]
-				account_name = detail['name']
 				account_result = format_check_in_notification(detail)
-				if not any(account_name in item for item in notification_content):
-					notification_content.append(account_result)
+				notification_content.append(account_result)
 
 	if current_balance_hash:
 		save_balance_hash(current_balance_hash)
